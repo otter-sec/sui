@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::json;
@@ -8,18 +10,20 @@ use serde_json::json;
 use rosetta_client::start_rosetta_test_server;
 use sui_config::genesis_config::{DEFAULT_GAS_AMOUNT, DEFAULT_NUMBER_OF_OBJECT_PER_ACCOUNT};
 use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
-use sui_keys::keystore::AccountKeystore;
+use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
 use sui_rosetta::operations::Operations;
 use sui_rosetta::types::{
     AccountBalanceRequest, AccountBalanceResponse, AccountIdentifier, NetworkIdentifier,
     SubAccount, SubAccountType, SuiEnv,
 };
 use sui_sdk::rpc_types::{SuiExecutionStatus, SuiTransactionBlockEffectsAPI};
+use sui_sdk::SuiClientBuilder;
+use sui_types::base_types::SuiAddress;
 use sui_types::messages::ExecuteTransactionRequestType;
 use sui_types::utils::to_sender_signed_transaction;
 use test_utils::network::TestClusterBuilder;
 
-use crate::rosetta_client::RosettaEndpoint;
+use crate::rosetta_client::{RosettaClient, RosettaEndpoint};
 
 mod rosetta_client;
 
@@ -489,4 +493,64 @@ async fn test_pay_sui_multiple_times() {
             serde_json::to_string(&ops2).unwrap()
         );
     }
+}
+
+#[ignore]
+#[tokio::test]
+async fn manual_smoke_test() {
+    let client = RosettaClient::new(9002, 9003, SuiEnv::TestNet);
+    let keystore = Keystore::File(
+        FileBasedKeystore::new(
+            &PathBuf::from_str("/Users/patrick/.sui/sui_config/sui.keystore").unwrap(),
+        )
+        .unwrap(),
+    );
+    let sender = SuiAddress::from(&keystore.keys()[0]);
+    let recipient = SuiAddress::from(&keystore.keys()[1]);
+
+    let ops = serde_json::from_value(json!(
+        [{
+            "operation_identifier":{"index":0},
+            "type":"PaySui",
+            "account": { "address" : recipient.to_string() },
+            "amount" : { "value": "1000000" , "currency": { "symbol": "SUI", "decimals": 9}}
+        },{
+            "operation_identifier":{"index":1},
+            "type":"PaySui",
+            "account": { "address" : sender.to_string() },
+            "amount" : { "value": "-1000000" , "currency": { "symbol": "SUI", "decimals": 9}}
+        }]
+    ))
+    .unwrap();
+
+    let response = client.rosetta_flow(&ops, &keystore).await;
+    println!("{response:?}");
+
+    let sui_client = SuiClientBuilder::default()
+        .build("http://0.0.0.0:9000")
+        .await
+        .unwrap();
+
+    // stake
+    let validator = sui_client
+        .governance_api()
+        .get_latest_sui_system_state()
+        .await
+        .unwrap()
+        .active_validators[0]
+        .sui_address;
+
+    let ops = serde_json::from_value(json!(
+        [{
+            "operation_identifier":{"index":0},
+            "type":"Stake",
+            "account": { "address" : sender.to_string() },
+            "amount" : { "value": "-1000000" , "currency": { "symbol": "SUI", "decimals": 9}},
+            "metadata": { "Stake" : {"validator": validator.to_string()} }
+        }]
+    ))
+    .unwrap();
+
+    let response = client.rosetta_flow(&ops, &keystore).await;
+    println!("{response:?}");
 }

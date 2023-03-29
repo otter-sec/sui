@@ -7,6 +7,7 @@ use axum_extra::extract::WithRejection;
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::hash::HashFunction;
 use futures::StreamExt;
+use std::cmp::min;
 
 use shared_crypto::intent::{Intent, IntentMessage};
 use sui_json_rpc_types::{
@@ -217,12 +218,12 @@ pub async fn metadata(
         .await?;
 
     // Get sender, amount, and rough budget for the operation
-    let (total_required_amount, objects, budget) = match &option.internal_operation {
+    let (total_required_amount, objects, rough_budget) = match &option.internal_operation {
         InternalOperation::PaySui { amounts, .. } => {
             let amount = amounts.iter().sum::<u64>();
-            (Some(amount), vec![], 2000)
+            (Some(amount), vec![], 2000 * gas_price)
         }
-        InternalOperation::Stake { amount, .. } => (*amount, vec![], 2000),
+        InternalOperation::Stake { amount, .. } => (*amount, vec![], 10000 * gas_price),
         InternalOperation::WithdrawStake { sender, stake_ids } => {
             let stake_ids = if stake_ids.is_empty() {
                 // unstake all
@@ -261,13 +262,13 @@ pub async fn metadata(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(SuiError::from)?;
 
-            (Some(0), stake_refs, 10000)
+            (Some(0), stake_refs, 10000 * gas_price)
         }
     };
 
     // Try select coins for required amounts
     let coins = if let Some(amount) = total_required_amount {
-        let total_amount = amount + (budget * gas_price);
+        let total_amount = amount + rough_budget;
         context
             .client
             .coin_read_api()
@@ -291,6 +292,13 @@ pub async fn metadata(
 
     let total_coin_value = coins.iter().fold(0, |sum, coin| sum + coin.balance);
 
+    // Make sure required amount + rough budget is not greater than total coin value
+    let rough_budget = if let Some(amount) = total_required_amount {
+        min(rough_budget, total_coin_value - amount)
+    } else {
+        rough_budget
+    };
+
     let coins = coins
         .into_iter()
         .map(|c| c.object_ref())
@@ -305,7 +313,7 @@ pub async fn metadata(
             objects: objects.clone(),
             total_coin_value,
             gas_price,
-            budget: budget * gas_price,
+            budget: rough_budget,
         })?;
 
     let dry_run = context
@@ -320,7 +328,7 @@ pub async fn metadata(
     }
 
     let budget = <u64>::from(effects.gas_cost_summary().computation_cost)
-        + <u64>::from(effects.gas_cost_summary().storage_cost);
+        + <u64>::from(effects.gas_cost_summary().storage_cost) * gas_price;
 
     Ok(ConstructionMetadataResponse {
         metadata: ConstructionMetadata {

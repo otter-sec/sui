@@ -47,7 +47,7 @@ pub async fn start_rosetta_test_server(
     // allow rosetta to process the genesis block.
     tokio::task::yield_now().await;
     (
-        RosettaClient::new(port, offline_port),
+        RosettaClient::new(port, offline_port, SuiEnv::LocalNet),
         vec![online_handle, offline_handle],
     )
 }
@@ -56,15 +56,17 @@ pub struct RosettaClient {
     client: Client,
     online_port: u16,
     offline_port: u16,
+    network: SuiEnv,
 }
 
 impl RosettaClient {
-    fn new(online: u16, offline: u16) -> Self {
+    pub fn new(online: u16, offline: u16, network: SuiEnv) -> Self {
         let client = Client::new();
         Self {
             client,
             online_port: online,
             offline_port: offline,
+            network,
         }
     }
     pub async fn call<R: Serialize, T: DeserializeOwned>(
@@ -100,7 +102,7 @@ impl RosettaClient {
     ) -> TransactionIdentifierResponse {
         let network_identifier = NetworkIdentifier {
             blockchain: "sui".to_string(),
-            network: SuiEnv::LocalNet,
+            network: self.network,
         };
         // Preprocess
         let preprocess: ConstructionPreprocessResponse = self
