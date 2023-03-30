@@ -4,11 +4,11 @@
 import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { PostHogAnalyticsProvider } from '@mysten/core';
 
-import { Layout } from './Layout';
+import { LayoutContent } from './LayoutContent';
 
 import { growthbook, GROWTHBOOK_FEATURES } from '~/utils/growthbook';
 
-export function LayoutContainer() {
+export function Layout() {
     const isPostHogEnabled = growthbook.getFeatureValue(
         GROWTHBOOK_FEATURES.EXPLORER_POSTHOG_ANALYTICS,
         false
@@ -17,7 +17,7 @@ export function LayoutContainer() {
     return (
         <PostHogAnalyticsProvider isEnabled={isPostHogEnabled}>
             <GrowthBookProvider growthbook={growthbook}>
-                <Layout />
+                <LayoutContent />
             </GrowthBookProvider>
         </PostHogAnalyticsProvider>
     );

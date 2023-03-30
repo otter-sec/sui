@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import {  RpcClientContext } from '@mysten/core';
+import { RpcClientContext } from '@mysten/core';
 import { WalletKitProvider } from '@mysten/wallet-kit';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
@@ -17,7 +17,7 @@ import { NetworkContext, useNetwork } from '~/context';
 import { DefaultRpcClient } from '~/utils/api/DefaultRpcClient';
 import { queryClient } from '~/utils/queryClient';
 
-export function Layout() {
+export function LayoutContent() {
     const [network, setNetwork] = useNetwork();
     const jsonRpcProvider = useMemo(() => DefaultRpcClient(network), [network]);
 
