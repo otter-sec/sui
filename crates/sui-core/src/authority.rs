@@ -1635,6 +1635,7 @@ impl AuthorityState {
             store.objects_lock_table.clone(),
             pruning_config,
             epoch_store.epoch_start_state().epoch_duration_ms(),
+            prometheus_registry,
         );
         let state = Arc::new(AuthorityState {
             name,
