@@ -14,7 +14,7 @@ use sui_types::balance::{
 use sui_types::base_types::ObjectID;
 use sui_types::gas_coin::GAS;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use tracing::{info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::programmable_transactions;
 use sui_macros::checked_arithmetic;
@@ -172,7 +172,6 @@ fn execute_transaction<
         Ok(obj_ref) => obj_ref,
         Err(_) => gas[0], // this cannot fail, but we use gas[0] anyway
     };
-    let is_system = transaction_kind.is_system_tx();
     // At this point no charge has been applied yet
     debug_assert!(
         u64::from(gas_status.gas_used()) == 0
@@ -180,13 +179,18 @@ fn execute_transaction<
             && gas_status.storage_gas_units() == 0,
         "No gas charges must be applied yet"
     );
+    #[cfg(debug_assertions)]
+    let is_genesis_tx = matches!(transaction_kind, TransactionKind::Genesis(_));
+    #[cfg(debug_assertions)]
+    let advance_epoch_gas_summary = transaction_kind.get_advance_epoch_tx_gas_summary();
+
     // We must charge object read here during transaction execution, because if this fails
     // we must still ensure an effect is committed and all objects versions incremented
     let result = charge_gas_for_object_read(temporary_store, &mut gas_status);
     let mut result = result.and_then(|()| {
         let mut execution_result = execution_loop::<Mode, _>(
             temporary_store,
-            transaction_kind,
+            transaction_kind.clone(),
             gas_object_ref.0,
             tx_ctx,
             move_vm,
@@ -226,15 +230,29 @@ fn execute_transaction<
         };
         execution_result
     });
-    if !gas_status.is_unmetered() {
-        temporary_store.charge_gas(gas_object_ref.0, &mut gas_status, &mut result, gas);
-    }
-    if !is_system {
-        #[cfg(debug_assertions)]
-        {
+    // We always go through the gas charging process, but for system transaction, we don't pass
+    // the gas object ID since it's not a valid object.
+    // TODO: Ideally we should make gas object ref None in the first place.
+    let gas_object_id = if gas_status.is_unmetered() {
+        None
+    } else {
+        Some(gas_object_ref.0)
+    };
+    temporary_store.charge_gas(gas_object_id, &mut gas_status, &mut result, gas);
+    #[cfg(debug_assertions)]
+    {
+        // Genesis transactions mint sui supply, and hence does not satisfy SUI conservation.
+        if !is_genesis_tx {
+            // For advance epoch transaction, we need to provide epoch rewards and rebates as extra
+            // information provided to check_sui_conserved, because we mint rewards, and burn
+            // the rebates. We also need to pass in the unmetered_storage_rebate because storage
+            // rebate is not reflected in the storage_rebate of gas summary. This is a bit confusing.
+            // We could probably clean up the code a bit.
             if !Mode::allow_arbitrary_values() {
                 // ensure that this transaction did not create or destroy SUI
-                temporary_store.check_sui_conserved().unwrap();
+                temporary_store
+                    .check_sui_conserved(advance_epoch_gas_summary)
+                    .unwrap();
             }
             // else, we're in dev-inspect mode, which lets you turn bytes into arbitrary
             // objects (including coins). this can violate conservation, but it's expected
@@ -492,6 +510,8 @@ fn advance_epoch<S: BackingPackageStore + ParentSync + ChildObjectResolver>(
             change_epoch,
         );
         temporary_store.drop_writes();
+        // Must reset the storage rebate since we are re-executing.
+        gas_status.reset_storage_cost_and_rebate();
         let advance_epoch_safe_mode_pt = construct_advance_epoch_safe_mode_pt(&params)?;
         programmable_transactions::execution::execute::<_, execution_mode::System>(
             protocol_config,
@@ -503,6 +523,26 @@ fn advance_epoch<S: BackingPackageStore + ParentSync + ChildObjectResolver>(
             advance_epoch_safe_mode_pt,
         )
         .expect("Advance epoch with safe mode must succeed");
+    }
+    if protocol_config.version.as_u64() > 1 {
+        // The following is a breaking change to version 1 since we are adding rebate to the
+        // 0x5 object in the resulting state.
+        let unmetered_storage_rebate = gas_status.unmetered_storage_rebate();
+        debug!(
+            "Amount of unmetered storage rebate from advance epoch tx: {:?}",
+            unmetered_storage_rebate
+        );
+        // Put all the storage rebate accumulated in the system transaction
+        // to the 0x5 object so that it's not lost.
+        let mut system_state_wrapper = temporary_store
+            .read_object(&SUI_SYSTEM_STATE_OBJECT_ID)
+            .expect("0x5 object must be muated in advance_epoch tx")
+            .clone();
+        // In unmetered execution, storage_rebate field of mutated object must be 0.
+        // If not, we would be dropping SUI on the floor by overriding it.
+        assert_eq!(system_state_wrapper.storage_rebate, 0);
+        system_state_wrapper.storage_rebate = unmetered_storage_rebate;
+        temporary_store.write_object(system_state_wrapper, WriteKind::Mutate);
     }
 
     for (version, modules, dependencies) in change_epoch.system_packages.into_iter() {
