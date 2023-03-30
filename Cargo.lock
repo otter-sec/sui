@@ -9666,6 +9666,7 @@ dependencies = [
  "move-compiler",
  "move-core-types",
  "move-stdlib",
+ "move-symbol-pool",
  "move-transactional-test-runner",
  "move-vm-runtime",
  "once_cell",

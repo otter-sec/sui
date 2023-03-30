@@ -9,9 +9,12 @@ use bimap::btree::BiBTreeMap;
 use move_binary_format::{file_format::CompiledScript, CompiledModule};
 use move_bytecode_utils::module_cache::GetModule;
 use move_command_line_common::{
-    address::ParsedAddress, files::verify_and_create_named_address_mapping,
+    address::ParsedAddress, env::read_bool_env_var, files::verify_and_create_named_address_mapping,
 };
+
 use move_compiler::{
+    compiled_unit::AnnotatedCompiledUnit,
+    diagnostics::{Diagnostics, FilesSourceText},
     shared::{NumberFormat, NumericalAddress, PackagePaths},
     Flags, FullyCompiledProgram,
 };
@@ -21,6 +24,7 @@ use move_core_types::{
     language_storage::{ModuleId, TypeTag},
     value::MoveStruct,
 };
+use move_symbol_pool::Symbol;
 use move_transactional_test_runner::{
     framework::{CompiledState, MoveTestAdapter},
     tasks::{InitCommand, SyntaxChoice, TaskInput},
@@ -28,12 +32,12 @@ use move_transactional_test_runner::{
 use move_vm_runtime::{move_vm::MoveVM, session::SerializedReturnValues};
 use once_cell::sync::Lazy;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::fmt::Write;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::Arc,
 };
+use std::{fmt::Write, str::FromStr};
 use sui_adapter::execution_engine;
 use sui_adapter::{adapter::new_move_vm, execution_mode};
 use sui_core::transaction_input_checker::check_objects;
@@ -42,7 +46,6 @@ use sui_framework::{
 };
 use sui_protocol_config::ProtocolConfig;
 use sui_types::gas::{GasCostSummary, SuiCostTable};
-use sui_types::id::UID;
 use sui_types::messages::CallArg;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::utils::to_sender_signed_transaction;
@@ -63,6 +66,7 @@ use sui_types::{
 use sui_types::{clock::Clock, SUI_SYSTEM_ADDRESS};
 use sui_types::{epoch_data::EpochData, messages::Command};
 use sui_types::{gas::SuiGasStatus, temporary_store::TemporaryStore};
+use sui_types::{id::UID, messages::Argument};
 use sui_types::{in_memory_storage::InMemoryStorage, messages::ProgrammableTransaction};
 
 pub(crate) type FakeID = u64;
@@ -584,11 +588,103 @@ impl<'a> MoveTestAdapter<'a> for SuiTestAdapter<'a> {
                 let output = self.object_summary_output(&summary, view_events, view_gas_used);
                 Ok(output)
             }
+            SuiSubcommand::UpgradePackage(UpgradePackageCommand {
+                package,
+                upgrade_capability,
+                gas_budget,
+            }) => {
+                let data = data.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Expected a module text block following 'upgrade' starting on lines {}-{}",
+                        start_line,
+                        command_lines_stop
+                    )
+                })?;
+                let (units, warnings_opt) = self.compile_source_units(data.path())?;
+                let modules = units
+                    .into_iter()
+                    .map(|unit| match unit {
+                        AnnotatedCompiledUnit::Module(annot_module) => {
+                            let (named_addr_opt, _id) = annot_module.module_id();
+                            let named_addr_opt = named_addr_opt.map(|n| n.value);
+                            let module = annot_module.named_module.module;
+                            (named_addr_opt, module)
+                        }
+                        AnnotatedCompiledUnit::Script(_) => panic!(
+                            "Expected a module text block, not a script, \
+                                    following 'publish' starting on lines {}-{}",
+                            start_line, command_lines_stop
+                        ),
+                    })
+                    .collect();
+
+                let output =
+                    self.upgrade_package(package, modules, upgrade_capability, gas_budget)?;
+                Ok(merge_output(warnings_opt, output))
+            }
+        }
+    }
+}
+
+fn merge_output(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (None, right) => right,
+        (left, None) => left,
+        (Some(mut left), Some(right)) => {
+            left.push_str(&right);
+            Some(left)
         }
     }
 }
 
 impl<'a> SuiTestAdapter<'a> {
+    fn upgrade_package(
+        &mut self,
+        current_package_object_id: Option<String>,
+        modules: Vec<(Option<Symbol>, CompiledModule)>,
+        upgrade_capability: Option<u64>,
+        gas_budget: Option<u64>,
+    ) -> anyhow::Result<Option<String>> {
+        let current_package_object_id = current_package_object_id
+            .map_or(ObjectID::from_address(AccountAddress::ZERO), |id| {
+                ObjectID::from_str(&id).unwrap()
+            });
+        let upgrade_capability = upgrade_capability.unwrap_or_default();
+        let all_bytes = modules
+            .iter()
+            .map(|(_, module)| {
+                let mut module_bytes = vec![];
+                module.serialize(&mut module_bytes)?;
+                Ok(module_bytes)
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let gas_budget = gas_budget.unwrap_or(DEFAULT_GAS_BUDGET);
+        let dependencies = system_package_ids();
+        let data = |sender, gas| {
+            let mut builder = ProgrammableTransactionBuilder::new();
+            builder.upgrade(
+                current_package_object_id,
+                Argument::Input(upgrade_capability as u16),
+                dependencies,
+                all_bytes,
+            );
+            let pt = builder.finish();
+            TransactionData::new_programmable_with_dummy_gas_price(
+                sender,
+                vec![gas],
+                pt,
+                gas_budget,
+            )
+        };
+
+        let transaction = self.sign_txn(None, data);
+        let summary = self.execute_txn(transaction, gas_budget)?;
+        let view_events = false;
+        let output =
+            self.object_summary_output(&summary, view_events, /* view_gas_used */ false);
+        Ok(output)
+    }
+
     fn sign_txn(
         &mut self,
         sender: Option<String>,
@@ -956,6 +1052,55 @@ impl<'a> SuiTestAdapter<'a> {
             None => "_".to_string(),
             Some(fake) if fake < INIT_NEXT_FAKE => format!("0x{fake:X}"),
             Some(fake) => format!("fake({})", fake),
+        }
+    }
+
+    fn compile_source_units(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<(Vec<AnnotatedCompiledUnit>, Option<String>)> {
+        fn rendered_diags(files: &FilesSourceText, diags: Diagnostics) -> Option<String> {
+            if diags.is_empty() {
+                return None;
+            }
+
+            let error_buffer = if read_bool_env_var(move_command_line_common::testing::PRETTY) {
+                move_compiler::diagnostics::report_diagnostics_to_color_buffer(files, diags)
+            } else {
+                move_compiler::diagnostics::report_diagnostics_to_buffer(files, diags)
+            };
+            Some(String::from_utf8(error_buffer).unwrap())
+        }
+
+        use move_compiler::PASS_COMPILATION;
+        let pre_compiled_deps = Some(&*PRE_COMPILED);
+        let (mut files, comments_and_compiler_res) = move_compiler::Compiler::from_files(
+            vec![path.as_ref().to_str().unwrap().to_owned()],
+            self.compiled_state
+                .source_files()
+                .cloned()
+                .collect::<Vec<_>>(),
+            self.compiled_state.named_address_mapping.clone(),
+        )
+        .set_pre_compiled_lib_opt(pre_compiled_deps)
+        .set_flags(move_compiler::Flags::empty().set_sources_shadow_deps(true))
+        .run::<PASS_COMPILATION>()?;
+        let units_or_diags = comments_and_compiler_res
+            .map(|(_comments, move_compiler)| move_compiler.into_compiled_units());
+
+        match units_or_diags {
+            Err(diags) => {
+                if let Some(pcd) = pre_compiled_deps {
+                    for (file_name, text) in &pcd.files {
+                        if !files.contains_key(file_name) {
+                            files.insert(*file_name, text.clone());
+                        }
+                    }
+                }
+
+                Err(anyhow::anyhow!(rendered_diags(&files, diags).unwrap()))
+            }
+            Ok((units, warnings)) => Ok((units, rendered_diags(&files, warnings))),
         }
     }
 }
