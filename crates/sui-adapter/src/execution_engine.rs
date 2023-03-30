@@ -14,7 +14,7 @@ use sui_types::balance::{
 use sui_types::base_types::ObjectID;
 use sui_types::gas_coin::GAS;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
 
 use crate::programmable_transactions;
 use sui_macros::checked_arithmetic;
@@ -239,31 +239,9 @@ fn execute_transaction<
         Some(gas_object_ref.0)
     };
     temporary_store.charge_gas(gas_object_id, &mut gas_status, &mut result, gas);
-    if protocol_config.gas_v2_enabled() {
-        // The following is a breaking change since we are adding rebate to the
-        // 0x5 object in the resulting state.
-        let unmetered_storage_rebate = gas_status.unmetered_storage_rebate();
-        debug!(
-            "Amount of unmetered storage rebate from advance epoch tx: {:?}",
-            unmetered_storage_rebate
-        );
-        // If unmetered_storage_rebate is 0, we are most likely executing the genesis transaction.
-        // And in that case we cannot mutate the 0x5 object because it's newly created.
-        if unmetered_storage_rebate > 0 {
-            // Put all the storage rebate accumulated in the system transaction
-            // to the 0x5 object so that it's not lost.
-            let mut system_state_wrapper = temporary_store
-                .read_object(&SUI_SYSTEM_STATE_OBJECT_ID)
-                .expect("0x5 object must be muated in advance_epoch tx")
-                .clone();
-            // In unmetered execution, storage_rebate field of mutated object must be 0.
-            // If not, we would be dropping SUI on the floor by overriding it.
-            assert_eq!(system_state_wrapper.storage_rebate, 0);
-            system_state_wrapper.storage_rebate = unmetered_storage_rebate;
-            temporary_store.write_object(system_state_wrapper, WriteKind::Mutate);
-        }
-
-    }
+    // Put all the storage rebate accumulated in the system transaction
+    // to the 0x5 object so that it's not lost.
+    temporary_store.conserve_unmetered_storage_rebate(gas_status.unmetered_storage_rebate());
     #[cfg(debug_assertions)]
     {
         // Genesis transactions mint sui supply, and hence does not satisfy SUI conservation.

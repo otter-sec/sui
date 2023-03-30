@@ -16,7 +16,6 @@ use tracing::trace;
 
 use crate::coin::Coin;
 use crate::committee::EpochId;
-use crate::is_system_package;
 use crate::messages::TransactionEvents;
 use crate::storage::ObjectStore;
 use crate::sui_system_state::{get_sui_system_state, SuiSystemState};
@@ -36,6 +35,7 @@ use crate::{
         WriteKind,
     },
 };
+use crate::{is_system_package, SUI_SYSTEM_STATE_OBJECT_ID};
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -537,6 +537,34 @@ impl<S> TemporaryStore<S> {
             self.deleted.len(),
             self.input_objects.len(),
         )
+    }
+
+    /// If there are unmetered storage rebate (due to system transaction), we put them into
+    /// the storage rebate of 0x5 object.
+    pub fn conserve_unmetered_storage_rebate(&mut self, unmetered_storage_rebate: u64) {
+        if unmetered_storage_rebate == 0 {
+            // If unmetered_storage_rebate is 0, we are most likely executing the genesis transaction.
+            // And in that case we cannot mutate the 0x5 object because it's newly created.
+            // And there is no storage rebate that needs distribution anyway.
+            return;
+        }
+        if !self.protocol_config.gas_v2_enabled() {
+            // This is a breaking change. Only do it in gas_v2.
+            return;
+        }
+        tracing::debug!(
+            "Amount of unmetered storage rebate from system tx: {:?}",
+            unmetered_storage_rebate
+        );
+        let mut system_state_wrapper = self
+            .read_object(&SUI_SYSTEM_STATE_OBJECT_ID)
+            .expect("0x5 object must be muated in system tx with unmetered storage rebate")
+            .clone();
+        // In unmetered execution, storage_rebate field of mutated object must be 0.
+        // If not, we would be dropping SUI on the floor by overriding it.
+        assert_eq!(system_state_wrapper.storage_rebate, 0);
+        system_state_wrapper.storage_rebate = unmetered_storage_rebate;
+        self.write_object(system_state_wrapper, WriteKind::Mutate);
     }
 }
 
