@@ -593,7 +593,9 @@ impl<S: ObjectStore> TemporaryStore<S> {
                 WriteKind::Mutate => {
                     // get owner at beginning of tx, since that's what we have to authenticate against
                     // _new_obj.owner is not relevant here
-                    let old_obj = self.store.get_object(id)?.unwrap();
+                    let old_obj = self.store.get_object(id)?.unwrap_or_else(|| {
+                        panic!("Mutated object must exist in the store: ID = {:?}", id)
+                    });
                     match &old_obj.owner {
                         Owner::ObjectOwner(_parent) => {
                             objs_to_authenticate.push(*id);

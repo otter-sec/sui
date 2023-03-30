@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 /// The minimum and maximum protocol versions supported by this build.
 const MIN_PROTOCOL_VERSION: u64 = 1;
-const MAX_PROTOCOL_VERSION: u64 = 1;
+const MAX_PROTOCOL_VERSION: u64 = 3;
 
 // Record history of protocol version allocations here:
 //
@@ -1323,7 +1323,7 @@ impl ProtocolConfig {
                 address_from_u256_cost_base: Some(52),
 
                 // `dynamic_field` module
-                // Cost params for the Move native function `hash_type_and_key<K: copy + drop + store>(parent: address, k: K): address`                
+                // Cost params for the Move native function `hash_type_and_key<K: copy + drop + store>(parent: address, k: K): address`
                 dynamic_field_hash_type_and_key_cost_base: Some(100),
                 dynamic_field_hash_type_and_key_type_cost_per_byte: Some(2),
                 dynamic_field_hash_type_and_key_value_cost_per_byte: Some(2),
@@ -1471,6 +1471,8 @@ impl ProtocolConfig {
                 // When adding a new constant, set it to None in the earliest version, like this:
                 // new_constant: None,
             },
+            2 => Self::get_for_version_impl(version - 1),
+            3 => Self::get_for_version_impl(version - 1),
 
             // Use this template when making changes:
             //
@@ -1504,6 +1506,10 @@ impl ProtocolConfig {
             *cur = Some(Box::new(override_fn));
             OverrideGuard
         })
+    }
+
+    pub fn gas_v2_enabled(&self) -> bool {
+        self.version.as_u64() >= 3
     }
 }
 

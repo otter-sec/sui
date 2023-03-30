@@ -571,7 +571,7 @@ mod sim_only_tests {
         // a protocol version increment.
         let system_state = test_cluster.wait_for_epoch(Some(1)).await;
         assert_eq!(system_state.epoch(), 1);
-        assert_eq!(system_state.protocol_version(), 2); // protocol version increments
+        assert_eq!(system_state.protocol_version(), FINISH); // protocol version increments
         assert!(system_state.safe_mode()); // enters safe mode
 
         // We are getting out of safe mode soon.
@@ -580,7 +580,7 @@ mod sim_only_tests {
         // This epoch change should execute successfully without any upgrade and get us out of safe mode.
         let system_state = test_cluster.wait_for_epoch(Some(2)).await;
         assert_eq!(system_state.epoch(), 2);
-        assert_eq!(system_state.protocol_version(), 2); // protocol version stays the same
+        assert_eq!(system_state.protocol_version(), FINISH); // protocol version stays the same
         assert!(!system_state.safe_mode()); // out of safe mode
     }
 
